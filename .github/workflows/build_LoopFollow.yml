@@ -1,22 +1,36 @@
-name: 4. Build LoopFollow
-run-name: Build LoopFollow (${{ github.ref_name }})
+# =============================================================================
+# Build Trio — UNSIGNED IPA (no code signing, no TestFlight)
+# -----------------------------------------------------------------------------
+# 与原版 "4. Build Trio" 的区别：
+#   1. 移除了 check_certs 任务（不再需要证书 / Match-Secrets 仓库）。
+#   2. 移除了 fastlane build_trio / release，改用 xcodebuild 直接做无签名归档。
+#   3. 不再需要任何签名类 secret：TEAMID / FASTLANE_* / MATCH_PASSWORD。
+#   4. 产出的未签名 IPA 通过 artifacts 上传，供 AltStore / Sideloadly 等
+#      侧载工具重新签名后安装。
+#
+# 仍需：GH_PAT（用于 fork 与上游同步）；一台 macOS runner（macos-26）。
+# 仍保留：上游同步、每周日触发、第 2 个周日强制构建、有新提交则构建的逻辑。
+# =============================================================================
+
+name: 4. Build Trio (Unsigned)
+run-name: Build Trio Unsigned (${{ github.ref_name }})
 on:
   workflow_dispatch:
   schedule:
     # Check for updates every Sunday
     #   Later logic builds if there are updates or if it is the 2nd Sunday of the month
-    - cron: "17 10 * * 0" # Sunday at UTC 10:17
+    - cron: "43 6 * * 0" # Sunday at UTC 06:43
 
-env:  
+env:
   GH_PAT: ${{ secrets.GH_PAT }}
-  UPSTREAM_REPO: loopandlearn/LoopFollow
+  UPSTREAM_REPO: nightscout/Trio
   UPSTREAM_BRANCH: ${{ github.ref_name }} # branch on upstream repository to sync from (replace with specific branch name if needed)
   TARGET_BRANCH: ${{ github.ref_name }} # target branch on fork to be kept in sync
 
 jobs:
   # use a single runner for these sequential steps
   check_status:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     name: Check status to decide whether to build
     permissions:
       contents: write
@@ -31,18 +45,20 @@ jobs:
         id: workflow-permission
         run: |
           # Validate Access Token
-          
+
           # Ensure that gh exit codes are handled when output is piped.
           set -o pipefail
-          
+
           # Define patterns to validate the access token (GH_PAT) and distinguish between classic and fine-grained tokens.
           GH_PAT_CLASSIC_PATTERN='^ghp_[a-zA-Z0-9]{36}$'
           GH_PAT_FINE_GRAINED_PATTERN='^github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}$'
-          
+
           # Validate Access Token (GH_PAT)
           if [ -z "$GH_PAT" ]; then
-            failed=true
-            echo "::error::The GH_PAT secret is unset or empty. Set it and try again."
+            # For an UNSIGNED build, GH_PAT is optional: it is only required for
+            # upstream sync / token-scoped automations. Skip validation instead of
+            # failing so the build can run from the current branch without syncing.
+            echo "::warning::The GH_PAT secret is unset or empty — upstream sync is disabled. The build will run from the current branch without syncing."
           else
             if [[ $GH_PAT =~ $GH_PAT_CLASSIC_PATTERN ]]; then
               provides_scopes=true
@@ -53,7 +69,7 @@ jobs:
               unknown_format=true
               echo "The GH_PAT secret does not have a known token format."
             fi
-            
+
             # Attempt to capture the x-oauth-scopes scopes of the token.
             if ! scopes=$(curl -sS -f -I -H "Authorization: token $GH_PAT" https://api.github.com | { grep -i '^x-oauth-scopes:' || true; } | cut -d ' ' -f2- | tr -d '\r'); then
               failed=true
@@ -80,7 +96,7 @@ jobs:
               echo "has_permission=true" >> $GITHUB_OUTPUT
             fi
           fi
-          
+
           # Exit unsuccessfully if secret validation failed.
           if [ $failed ]; then
             exit 2
@@ -98,7 +114,7 @@ jobs:
       - name: Sync upstream changes
         if: | # do not run the upstream sync action on the upstream repository
           steps.workflow-permission.outputs.has_permission == 'true' &&
-          vars.SCHEDULED_SYNC != 'false' && github.repository_owner != 'loopandlearn'
+          vars.SCHEDULED_SYNC != 'false' && github.repository_owner != 'nightscout'
         id: sync
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.2
         with:
@@ -121,20 +137,14 @@ jobs:
           vars.SCHEDULED_SYNC != 'false' && steps.sync.outputs.has_new_commits == 'false'
         run: echo "There were no new commits."
 
-      - name: Show value of 'has_new_commits'
-        if: steps.workflow-permission.outputs.has_permission == 'true' && vars.SCHEDULED_SYNC != 'false'
-        run: |
-          echo ${{ steps.sync.outputs.has_new_commits }}
-          echo "NEW_COMMITS=${{ steps.sync.outputs.has_new_commits }}" >> $GITHUB_OUTPUT
-
       - name: Show scheduled build configuration message
         if: steps.workflow-permission.outputs.has_permission != 'true'
         run: |
           echo "### :calendar: Scheduled Sync and Build Disabled :mobile_phone_off:" >> $GITHUB_STEP_SUMMARY
-          echo "You have not yet configured the scheduled sync and build for ${{ github.event.repository.name }}'s browser build." >> $GITHUB_STEP_SUMMARY
-          echo "Synchronizing your fork of <code>${{ github.event.repository.name }}</code> with the upstream repository <code>${{ env.UPSTREAM_REPO }}</code> will be skipped." >> $GITHUB_STEP_SUMMARY
-          echo "If you want to enable automatic builds and updates for your ${{ github.event.repository.name }}, please follow the instructions \
-              under the following path <code>${{ github.event.repository.name }}/fastlane/testflight.md</code>." >> $GITHUB_STEP_SUMMARY
+          echo "You have not yet configured the scheduled sync and build for Trio's browser build." >> $GITHUB_STEP_SUMMARY
+          echo "Synchronizing your fork of <code>Trio</code> with the upstream repository <code>nightscout/Trio</code> will be skipped." >> $GITHUB_STEP_SUMMARY
+          echo "If you want to enable automatic builds and updates for your Trio, please follow the instructions \
+              under the following path <code>Trio/fastlane/testflight.md</code>." >> $GITHUB_STEP_SUMMARY
 
       # Set a logic flag if this is the second instance of this day-of-week in this month
       - name: Check if this is the second time this day-of-week happens this month
@@ -154,7 +164,7 @@ jobs:
   cancel_when_no_build:
     needs: check_status
     name: Cancel run when there is nothing to build
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     permissions:
       actions: write
     if: |
@@ -172,24 +182,11 @@ jobs:
           # "cancelled" rather than completing successfully first.
           sleep 300
 
-  # Checks if Distribution certificate is present and valid, optionally nukes and
-  # creates new certs if the repository variable ENABLE_NUKE_CERTS == 'true'
-  # only run if a build is planned
-  check_certs:
-      needs: [check_status]
-      name: Check certificates
-      uses: ./.github/workflows/create_certs.yml
-      secrets: inherit
-      if: |
-        github.event_name == 'workflow_dispatch' ||
-          (vars.SCHEDULED_BUILD != 'false' && needs.check_status.outputs.IS_SECOND_IN_MONTH == 'true') ||
-          (vars.SCHEDULED_SYNC != 'false' && needs.check_status.outputs.NEW_COMMITS == 'true' )
-
-  # Builds the app
+  # Builds an UNSIGNED Trio IPA (no code signing, no TestFlight upload).
   build:
-    name: Build
-    needs: [check_certs, check_status]
-    runs-on: xcode-27
+    name: Build Unsigned IPA
+    needs: [check_status]
+    runs-on: macos-26
     permissions:
       contents: write
     if:
@@ -199,58 +196,116 @@ jobs:
         (vars.SCHEDULED_SYNC != 'false' && needs.check_status.outputs.NEW_COMMITS == 'true' )
     steps:
       - name: Select Xcode version
-        run: "sudo xcode-select --switch /Applications/Xcode_27.0.app/Contents/Developer"
+        run: "sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer"
 
       - name: Checkout Repo for building
         uses: actions/checkout@v5
         with:
-          token: ${{ secrets.GH_PAT }}
           submodules: recursive
           ref: ${{ env.TARGET_BRANCH }}
 
-      # Patch Fastlane Match to not print tables
-      - name: Patch Match Tables
+      # Customize Trio: apply any patches located in the Trio/patches/ directory.
+      # NOTE: the original `if $(ls ./patches/* ...)` form is buggy — when the
+      # glob matches nothing, `ls` is suppressed and the `$(...)` runs an empty
+      # command (always succeeds), so `git apply ./patches/*` would then run
+      # against a literal non-existent path and fail the step. Fixed below.
+      - name: Customize Trio
         run: |
-          TABLE_PRINTER_PATH=$(ruby -e 'puts Gem::Specification.find_by_name("fastlane").gem_dir')/match/lib/match/table_printer.rb
-          if [ -f "$TABLE_PRINTER_PATH" ]; then
-            sed -i "" "/puts(Terminal::Table.new(params))/d" "$TABLE_PRINTER_PATH"
+          if [ -d ./patches ] && compgen -G "./patches/*" > /dev/null; then
+            git apply ./patches/* --allow-empty -v --whitespace=fix
           else
-            echo "table_printer.rb not found"
-            exit 1
+            echo "No patches found — continuing."
           fi
 
-      # Install project dependencies
-      - name: Install Project Dependencies
-        run: bundle install
+          # Download and apply Trio patches from GitHub:
+          # Template for customizing Trio code (as opposed to submodule code)
+          # Remove the "#" sign from the beginning of the line below to activate
+          #   and then replace the alphanumeric string with your SHA, this SHA is NOT valid
+          #curl https://github.com/nightscout/Trio/commit/d206432b024279ef710df462b20bd464cd9682d4.patch | git apply -v --whitespace=fix
 
-      # Sync the GitHub runner clock with the Windows time server (workaround as suggested in https://github.com/actions/runner/issues/2996)
+          # Download and apply Submodule patches from GitHub:
+          # Template for customizing submodules (you must edit the submodule name)
+          # This example is for G7SensorKit showing you can apply multiple commits, in the proper order
+          # Remove the "#" sign from the beginning of the lines below to activate
+          #curl https://github.com/loopandlearn/G7SensorKit/commit/ba44beb3d1491c453f4f438443c3f8ba29146ab3.patch | git apply --directory=G7SensorKit -v --whitespace=fix
+          #curl https://github.com/loopandlearn/G7SensorKit/commit/d86ac8e9cd523d1267587dd70c96597125eef7ab.patch | git apply --directory=G7SensorKit -v --whitespace=fix
+          #curl https://github.com/loopandlearn/G7SensorKit/commit/205054e7537723c2aec58d807634b4853f687244.patch | git apply --directory=G7SensorKit -v --whitespace=fix
+
+      # Optional: silence the startup warning shown on builds made from a branch
+      # other than main. Off unless you set DEV_BRANCH_WARNING_DISABLED=true.
+      - name: Configure Dev Branch Warning
+        if: vars.DEV_BRANCH_WARNING_DISABLED == 'true'
+        run: |
+          echo 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEV_BRANCH_WARNING_DISABLED' >> ConfigOverride.xcconfig
+          echo "::warning::Development branch warning disabled for this build."
+
+      # Sync the GitHub runner clock with the Windows time server
       - name: Sync clock
         run: sudo sntp -sS time.windows.com
 
-      # Build signed IPA file
-      - name: Fastlane Build & Archive
-        run: bundle exec fastlane build_LoopFollow
-        env:
-          TEAMID: ${{ secrets.TEAMID }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
-          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
-          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      # Build a SIGNED-less archive. CODE_SIGNING_ALLOWED=NO lets Xcode archive
+      # without requiring a team / provisioning profile / certificate.
+      - name: Build unsigned archive
+        run: |
+          set -o pipefail
+          mkdir -p buildlog
+          xcodebuild -workspace Trio.xcworkspace -list
 
-      # Upload to TestFlight
-      - name: Fastlane upload to TestFlight
-        run: bundle exec fastlane release
-        env:
-          TEAMID: ${{ secrets.TEAMID }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
-          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
-          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          xcodebuild \
+            -workspace Trio.xcworkspace \
+            -scheme Trio \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/Trio.xcarchive" \
+            clean archive \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tee buildlog/Trio-build.log
 
-      # Upload Build artifacts
-      - name: Upload build log, IPA and Symbol artifacts
+      # Package the unsigned .app into an unsigned .ipa (Payload zip).
+      # This is the well-documented "export without signing" approach and works
+      # for sideloading tools (AltStore / Sideloadly) that re-sign on install.
+      - name: Package unsigned IPA
+        run: |
+          set -o pipefail
+          # NOTE: keep everything relative to the workspace root ($PWD). Do NOT
+          # `cd` into build/, otherwise the artifacts/ dir we create ends up under
+          # build/artifacts and the upload-artifact `path: artifacts` (resolved
+          # from the workspace root) won't find the IPA.
+          ARCHIVE_APP_DIR="$PWD/build/Trio.xcarchive/Products/Applications"
+          echo "== xcarchive Applications =="
+          ls -la "$ARCHIVE_APP_DIR" || true
+
+          APP_PATH=$(find "$ARCHIVE_APP_DIR" -maxdepth 1 -name '*.app' | head -n1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle found inside the archive — build likely failed (see buildlog/Trio-build.log)."
+            echo "== archive tree (top 40) =="
+            find "$PWD/build/Trio.xcarchive" -maxdepth 4 | head -n 40 || true
+            exit 1
+          fi
+          echo "Found app bundle: $APP_PATH"
+
+          rm -rf "$PWD/Payload"
+          mkdir -p "$PWD/Payload"
+          cp -R "$APP_PATH" "$PWD/Payload/"
+
+          ZIP_NAME="Trio-unsigned-${{ github.ref_name }}.ipa"
+          rm -f "$ZIP_NAME"
+          zip -r -q "$ZIP_NAME" Payload
+          rm -rf "$PWD/Payload"
+
+          mkdir -p "$PWD/artifacts"
+          mv "$ZIP_NAME" "$PWD/artifacts/"
+
+          echo "== produced file =="
+          ls -la "$PWD/artifacts"
+          file "$PWD/artifacts/$ZIP_NAME" || true
+          echo "::notice::Unsigned IPA: artifacts/$ZIP_NAME — re-sign with AltStore/Sideloadly before installing."
+
+      # Upload Build artifacts (unsigned IPA + build log)
+      - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
